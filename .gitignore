@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtualenv
+venv/
+
+# Data / Precomputed
+data/
+precomputed/
+
+# Checkpoints
+checkpoints/
+
+# Logs
+logs/
+*.log
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
