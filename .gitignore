@@ -8,7 +8,7 @@ __pycache__/
 venv/
 
 # Data / Precomputed
-data/
+data/*.zip
 precomputed/
 
 # Checkpoints
