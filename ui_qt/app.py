@@ -21,16 +21,23 @@ from bots.random_bot import RandomBot
 from bots.base import Bot
 from bots.mcts_bot import MCTSBot
 
+from bots.puct_bot import PUCTBot
+import torch
+
+from features.alpha48 import FeatureState
+
+
 
 class AIWorker(QObject):
     finished = Signal(object)           # (Move, stats)
     progress = Signal(int, int, object) # (done, total, stats)
     error = Signal(str)
 
-    def __init__(self, bot: Bot, board: Board):
+    def __init__(self, bot: Bot, board: Board, st: FeatureState):
         super().__init__()
         self.bot = bot
         self.board = board  # 이미 copy된 보드
+        self.st = st
 
     @Slot()
     def run(self):
@@ -41,8 +48,12 @@ class AIWorker(QObject):
                     self.progress.emit(done, total, stats)
 
                 move, stats = self.bot.select_move_with_stats(
-                    self.board, topk=5, progress_cb=cb, progress_every=10
+                    self.board,
+                    self.st,
+                    topk=5,
+                    progress_cb=cb,   # ✅ 여기!
                 )
+
             else:
                 move = self.bot.select_move(self.board)
                 stats = []
@@ -60,13 +71,21 @@ class MainWindow(QMainWindow):
 
         # game state
         self.board = Board(size=19, komi=7.5, superko=False)
+        self.st = FeatureState.new(self.board.size)   # ✅ 추가
         self.undo_stack: List = []
 
         # mode
         self.use_ai = False
         self.ai_color: Stone = Stone.WHITE
         # self.bot: Bot = RandomBot()
-        self.bot: Bot = MCTSBot(num_simulations=200, rollout_depth=80)
+        # self.bot: Bot = MCTSBot(num_simulations=200, rollout_depth=80)
+        self.bot = PUCTBot(
+            policy_weight="checkpoints/sl_policy/policy_sl_latest.pt",
+            device="mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"),
+            num_simulations=400,
+            c_puct=1.5,
+            rollout_depth=0,
+        )
 
         # self.bot: Bot = MCTSBot(num_simulations=400, rollout_depth=120)
 
@@ -188,20 +207,23 @@ class MainWindow(QMainWindow):
 
     # ---- game ops ----
     def snapshot_push(self):
-        self.undo_stack.append(self.board._snapshot_min())
+        self.undo_stack.append((self.board._snapshot_min(), self.st.copy()))
 
     def try_play(self, move: Move):
         try:
             self.snapshot_push()
-            self.board.play(move)
+            self.st.apply_and_update(self.board, move)   # ✅ 핵심
         except IllegalMove as e:
-            self.undo_stack.pop()  # revert snapshot push
+            self.undo_stack.pop()
             QMessageBox.information(self, "Illegal Move", str(e))
         finally:
+            self.board_widget.set_suggestions([])
+            self.lbl_topk.setText("TopK:\n-")
             self.refresh_status()
             self.board_widget.update()
             if self.board.game_over:
                 self.on_game_over()
+
 
     def clear_ai_hints(self):
         self.board_widget.set_suggestions([])
@@ -225,27 +247,28 @@ class MainWindow(QMainWindow):
     def on_undo(self):
         if not self.undo_stack:
             return
-        snap = self.undo_stack.pop()
-        self.board._restore_min(snap)
+        board_snap, st_snap = self.undo_stack.pop()
+        self.board._restore_min(board_snap)
+        self.st = st_snap
         self.refresh_status()
         self.board_widget.update()
-        self.clear_ai_hints()
+
 
     def on_new_game(self):
         size = int(self.cmb_size.currentText())
-        # komi: UI 단순화를 위해 정수만 받았는데, 19줄 기준 komi=7.5를 기본으로 쓰고 싶으면 아래처럼:
         komi = 7.5 if self.spn_komi.value() == 8 else float(self.spn_komi.value())
         superko = self.chk_superko.isChecked()
 
         self.board = Board(size=size, komi=komi, superko=superko)
+        self.st = FeatureState.new(size)   # ✅ 추가
         self.undo_stack.clear()
         self.board_widget.set_board(self.board)
         self.refresh_status()
         self.board_widget.update()
 
-        # 새 게임에서 AI가 선이면 즉시 두게
         if self.use_ai and self.board.to_play == self.ai_color:
             self.run_ai_move()
+
 
         self.clear_ai_hints()
 
@@ -316,9 +339,10 @@ class MainWindow(QMainWindow):
 
         # MCTS 중에 메인 보드가 바뀌면 꼬이니까 copy해서 넘김
         board_copy = self.board.copy()
+        st_copy = self.st.copy()
 
         self.ai_thread = QThread(self)
-        self.ai_worker = AIWorker(self.bot, board_copy)
+        self.ai_worker = AIWorker(self.bot, board_copy, st_copy)
         self.ai_worker.moveToThread(self.ai_thread)
 
         self.ai_thread.started.connect(self.ai_worker.run)

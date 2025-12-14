@@ -136,15 +136,18 @@ def train_sl(
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=0,
+        num_workers=2,
         pin_memory=False,
+        persistent_workers=True,
+        prefetch_factor=2
     )
 
     model = PolicyNet().to(device)
-    optimizer = torch.optim.SGD(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
-        momentum=0.9,
+        betas=(0.9, 0.999),
+        # momentum=0.9,
         weight_decay=1e-4,
     )
     criterion = nn.CrossEntropyLoss()
@@ -167,7 +170,7 @@ def train_sl(
             batch_size=batch_size,
             num_val_batches=num_val_batches,
             seed=123, # 고정
-        )
+        )  
         print(f"[val] fixed batches={len(fixed_val_batches)} (each batch={batch_size})")
 
     model.train()
@@ -200,15 +203,19 @@ def train_sl(
             running_top10 += acc[10] * bs
             running_n += bs
 
-        if step % 100 == 0:
+        log_every = 100 # steps
+        if step % log_every == 0:
+            with torch.no_grad():
+                acc = topk_accuracy(logits, y, ks=(1, 5, 10))  # ✅ 여기서만
+                # 참고: 여기 acc는 "마지막 배치" 기준이니,
+                # 진짜 running 평균을 원하면 아래처럼 누적해야 함(선택)
             avg_loss = running_loss / max(running_n, 1)
-            avg_t1 = running_top1 / max(running_n, 1)
-            avg_t5 = running_top5 / max(running_n, 1)
-            avg_t10 = running_top10 / max(running_n, 1)
+
             pbar.set_description(
-                f"step={step} loss={avg_loss:.4f} t1={avg_t1:.3f} t5={avg_t5:.3f} t10={avg_t10:.3f}"
+                f"step={step} loss={avg_loss:.4f} "
+                f"t1={acc[1]:.3f} t5={acc[5]:.3f} t10={acc[10]:.3f}"
             )
-            running_loss = running_top1 = running_top5 = running_top10 = 0.0
+            running_loss = 0.0
             running_n = 0
 
         # periodic val
@@ -222,9 +229,9 @@ def train_sl(
                 val_t10=f"{metrics['val_top10']:.3f}",
             )
 
-        if save_every and (step % save_every == 0):
-            save_checkpoint(out_dir / f"policy_sl_{step}.pt", model, optimizer, step)
-            save_checkpoint(ckpt_latest, model, optimizer, step)
+        # if save_every and (step % save_every == 0):
+        #     save_checkpoint(out_dir / f"policy_sl_{step}.pt", model, optimizer, step)
+        #     save_checkpoint(ckpt_latest, model, optimizer, step)
 
         if step >= num_steps:
             break
@@ -239,8 +246,8 @@ if __name__ == "__main__":
         precomp_val_dir=Path("precomputed/sl_kgs_alpha48_val"),
         out_dir=Path("checkpoints/sl_policy"),
         batch_size=128,
-        lr=0.01,
-        num_steps=2000,
+        lr=3e-4,
+        num_steps=60000,
         save_every=500,
         eval_every=200,
         num_val_batches=10,

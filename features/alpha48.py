@@ -288,46 +288,75 @@ def ladder_escape_success(board: Board, move: Move, max_depth: int = 50) -> bool
                 return True
     return False
 
-
 # -------------------------
-# FeatureState (turn-since)
+# FeatureState (turn-since + recent moves)
 # -------------------------
 @dataclass
 class FeatureState:
     """
-    ages[y, x] = 돌이 놓인 ply (현재 보드에 남아있는 돌만 의미있음)
-    empty = -1
+    AlphaGo-style feature state.
     """
     size: int
-    ages: np.ndarray  # int32, shape (size, size)
+    ages: np.ndarray                 # (size, size), int32, ply when stone placed
+    last_moves: np.ndarray           # (8, size, size), float32
     ply: int = 0
+    captures_black: int = 0
+    captures_white: int = 0
 
     @classmethod
     def new(cls, size: int) -> "FeatureState":
-        return cls(size=size, ages=np.full((size, size), -1, dtype=np.int32), ply=0)
+        return cls(
+            size=size,
+            ages=np.full((size, size), -1, dtype=np.int32),
+            last_moves=np.zeros((8, size, size), dtype=np.float32),
+            ply=0,
+            captures_black=0,
+            captures_white=0,
+        )
+
+    def copy(self) -> "FeatureState":
+        ns = FeatureState.new(self.size)
+        ns.ply = self.ply
+        ns.ages[...] = self.ages
+        ns.last_moves[...] = self.last_moves
+        ns.captures_black = self.captures_black
+        ns.captures_white = self.captures_white
+        return ns
 
     def apply_and_update(self, board: Board, move: Move):
         """
-        board.play(move) 호출 전/후 grid diff로 ages 갱신.
+        board.play(move) 전후로 feature state 갱신
         """
-        before = get_grid(board)
-        # before를 numpy로 고정
-        b_before = np.array(before, dtype=np.int8)
+        before = np.array(get_grid(board), dtype=np.int8)
 
         board.play(move)
 
-        after = get_grid(board)
-        b_after = np.array(after, dtype=np.int8)
+        after = np.array(get_grid(board), dtype=np.int8)
 
         self.ply += 1
 
-        # changed points update
-        # empty -> stone : record ply
-        placed = (b_before == Stone.EMPTY) & (b_after != Stone.EMPTY)
-        removed = (b_before != Stone.EMPTY) & (b_after == Stone.EMPTY)
+        # --- update ages
+        placed = (before == Stone.EMPTY) & (after != Stone.EMPTY)
+        removed = (before != Stone.EMPTY) & (after == Stone.EMPTY)
 
         self.ages[placed] = self.ply
         self.ages[removed] = -1
+
+        # --- update captures (UI / stats 용)
+        if board.to_play == Stone.WHITE:
+            # 방금 Black이 둔 수
+            self.captures_black = board.captures_black
+        else:
+            self.captures_white = board.captures_white
+
+        # --- update last_moves (shift + one-hot)
+        self.last_moves[1:] = self.last_moves[:-1]
+        self.last_moves[0].fill(0.0)
+
+        if not move.is_pass and not move.is_resign:
+            self.last_moves[0, move.y, move.x] = 1.0
+
+
 
 
 # -------------------------
@@ -470,7 +499,7 @@ def extract_alpha48_planes(board: Board, st: FeatureState, include_value_color_p
     else:
         ladder_cap = np.zeros((size, size), np.float32)
         ladder_esc = np.zeros((size, size), np.float32)
-        
+
     planes.append(ladder_cap)
     planes.append(ladder_esc)
 
@@ -503,3 +532,5 @@ def extract_alpha48_planes(board: Board, st: FeatureState, include_value_color_p
         assert x.shape[0] == 49
 
     return x
+
+

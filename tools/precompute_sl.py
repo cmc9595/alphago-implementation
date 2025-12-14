@@ -15,13 +15,15 @@ from data.sgf_dataset import iter_sl_samples
 @dataclass
 class PrecomputeConfig:
     zip_dir: Path = Path("data")
-    out_dir: Path = Path("precomputed/sl_kgs_alpha48")
+    out_dir: Path = Path("precomputed/sl_kgs_alpha48_d6p")
     board_size: int = 19
     include_pass: bool = False
     max_games: int | None = None
 
     shard_size: int = 4096            # samples per shard
     compress_dtype: str = "uint8"     # "uint8" or "float16" or "float32"
+
+    min_dan_both: int | None = 6   # ✅ 추가 (양쪽 6단 이상만)
 
 
 def _pack_x(x: np.ndarray, dtype: str) -> torch.Tensor:
@@ -47,6 +49,7 @@ def main(cfg: PrecomputeConfig):
         board_size=cfg.board_size,
         include_pass=cfg.include_pass,
         max_games=cfg.max_games,
+        min_dan_both=cfg.min_dan_both,   # ✅ 추가
     )
 
     for sample in tqdm(it, desc="precompute"):
@@ -78,6 +81,7 @@ def main(cfg: PrecomputeConfig):
         "compress_dtype": cfg.compress_dtype,
         "shard_size": cfg.shard_size,
         "num_samples": n_samples,
+        "min_dan_both": cfg.min_dan_both,  # ✅ 추가
     }
     torch.save(manifest, cfg.out_dir / "manifest.pt")
     print(f"[done] samples={n_samples} shards~{shard_idx+1} out={cfg.out_dir}")
