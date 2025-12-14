@@ -33,6 +33,7 @@ def _rank_to_dan(rank: str | None) -> int | None:
 def _both_min_dan(game: SgfGame, min_dan: int) -> bool:
     bd = _rank_to_dan(game.black_rank)
     wd = _rank_to_dan(game.white_rank)
+    print(f'bd:{bd}, wd:{wd}')
     return (bd is not None and wd is not None and bd >= min_dan and wd >= min_dan)
 
 def move_to_index(move: Move, size: int = 19) -> int:

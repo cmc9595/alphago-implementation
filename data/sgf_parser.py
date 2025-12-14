@@ -98,6 +98,8 @@ def parse_sgf_game(source: str, data: bytes) -> Optional[SgfGame]:
         setup_black=setup_black,
         setup_white=setup_white,
         moves=moves,
+        black_rank=br,
+        white_rank=wr
     )
 
 from pathlib import Path
