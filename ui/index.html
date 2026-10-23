@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlphaGo 실험 바둑판</title>
+<style>
+  :root {
+    --bg: #f4f1ea; --panel: #ffffff; --text: #22201c; --muted: #77716a; --line: #e2ddd3;
+    --wood: #dcb36b; --grid: #3b2f1e; --accent: #2f6fde; --black-bar: #22201c; --white-bar: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17171a; --panel: #222226; --text: #ebe8e2; --muted: #9a958d; --line: #34343a;
+            --wood: #c9a15c; --accent: #6b9cff; --white-bar: #ebe8e2; --black-bar: #0d0d0f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif; }
+  main { display: flex; gap: 20px; padding: 20px; max-width: 1180px; margin: 0 auto; flex-wrap: wrap; }
+  #boardWrap { flex: 1 1 640px; max-width: 760px; }
+  canvas { width: 100%; aspect-ratio: 1; display: block; border-radius: 6px; cursor: pointer;
+           box-shadow: 0 2px 10px rgba(0,0,0,.18); }
+  aside { flex: 1 1 300px; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font: inherit; padding: 7px 12px; border-radius: 7px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .bar { height: 22px; border-radius: 6px; overflow: hidden; display: flex; border: 1px solid var(--line); }
+  .bar div { height: 100%; transition: width .3s; }
+  .barlabels { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 3px 0; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; }
+  .status { font-weight: 600; }
+  .toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+  #error { color: #d9534f; min-height: 1em; font-size: 12px; }
+  select { font: inherit; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--text); }
+  .setting { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 6px 0; }
+  .pv { font-size: 11px; color: var(--muted); word-spacing: 3px; }
+  #analysis td { vertical-align: top; }
+  #valueCard .bar { height: 30px; }
+  #valueCard .caps { display: flex; justify-content: space-between; margin-top: 10px; padding-top: 10px;
+                     border-top: 1px solid var(--line); font-size: 15px; }
+  #valueCard .caps b { font-size: 18px; margin-left: 4px; }
+  .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px;
+         vertical-align: -1px; border: 1px solid #888; }
+  .dot.black { background: #111; } .dot.white { background: #f2f0ea; }
+  #valueCard .barlabels { font-size: 15px; font-weight: 700; color: var(--text); }
+  #history { font-size: 12px; color: var(--muted); max-height: 90px; overflow: auto; word-spacing: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <div id="boardWrap">
+    <canvas id="board" width="1520" height="1520"></canvas>
+    <div class="card" id="valueCard" style="margin-top:12px">
+      <h2>가치 head 예상 승률</h2>
+      <div id="liveStatus" class="sub" style="margin-bottom:6px"></div>
+      <div class="bar"><div id="bBar" style="background:var(--black-bar)"></div><div id="wBar" style="background:var(--white-bar)"></div></div>
+      <div class="barlabels"><span id="bPct">흑 –</span><span id="wPct">백 –</span></div>
+      <div id="scoreLead" class="barlabels" style="display:none; margin-top:6px; font-weight:600"></div>
+      <div id="terrScore" class="barlabels" style="display:none; margin-top:6px"></div>
+      <div id="mctsValue" class="barlabels" style="display:none; margin-top:6px"></div>
+      <div id="candidateLegend" class="sub" style="display:none; margin-top:8px"><span style="color:#086ac4">● 1위</span> · <span style="color:#08734f">● 2~3위</span> · <span style="color:#465566">● 4~12위</span><br>최대 12개 · 큰 숫자: 방문 순위 · 아래 %: 현재 차례 승률 추정</div>
+      <div class="caps">
+        <span><span class="dot black"></span>흑이 따낸 돌 <b id="capB">0</b></span>
+        <span><span class="dot white"></span>백이 따낸 돌 <b id="capW">0</b></span>
+      </div>
+    </div>
+  </div>
+  <aside>
+    <div class="card">
+      <h1>AlphaGo 실험 바둑판</h1>
+      <div class="sub"><b id="model">–</b> · <span id="engine">–</span> · 중국식 면적 계가 · 덤 <span id="komi">7.5</span></div>
+    </div>
+    <div class="card">
+      <div class="status" id="status">불러오는 중…</div>
+      <div id="error"></div>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="newB">새 대국 (내가 흑)</button>
+        <button id="newW">새 대국 (내가 백)</button>
+        <button id="newBoth">새 대국 (양쪽 직접)</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="pass">패스</button>
+        <button id="undo">무르기</button>
+        <button id="ai">AI가 대신 두기</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label class="toggle"><input type="checkbox" id="heat" checked> 정책 히트맵</label>
+        <label class="toggle"><input type="checkbox" id="nums"> 수순 번호</label>
+        <label class="toggle" id="terrWrap" style="display:none"><input type="checkbox" id="terr"> 형세 판단 (소유권)</label>
+      </div>
+    </div>
+    <div class="card">
+      <h2>설정</h2>
+      <div class="setting"><label for="playMode">대국 방식</label>
+        <select id="playMode">
+          <option value="B">내가 흑 · AI가 백</option>
+          <option value="W">내가 백 · AI가 흑</option>
+          <option value="both">흑·백 모두 직접 두기</option>
+        </select></div>
+      <label class="toggle"><input type="checkbox" id="liveOn"> 실시간 누적 MCTS (착수할 때까지 계속)</label>
+      <div class="sub" style="margin:5px 0 10px">20만 노드 또는 트리 약 2 GiB에서 정지·보존합니다. 착수하면 새 국면에서 시작합니다.</div>
+      <div class="setting"><span>컴퓨터 강도 (수당 탐색 횟수)</span>
+        <select id="strength">
+          <option value="0">정책망 단독 (탐색 없음)</option>
+          <option value="100">MCTS 100회</option>
+          <option value="400">MCTS 400회</option>
+          <option value="1600">MCTS 1600회</option>
+          <option value="3200">MCTS 3200회</option>
+          <option value="6400">MCTS 6400회</option>
+          <option value="12800">MCTS 12800회</option>
+        </select></div>
+      <div class="setting"><label class="toggle"><input type="checkbox" id="anaOn"> 단발 분석 (지정 횟수만 탐색)</label>
+        <select id="anaPlayouts">
+          <option value="400">400회</option>
+          <option value="1600" selected>1600회</option>
+          <option value="3200">3200회</option>
+          <option value="6400">6400회</option>
+          <option value="12800">12800회</option>
+        </select></div>
+    </div>
+    <div class="card" id="anaCard" style="display:none">
+      <h2>분석: 탐색 추천수 (<span id="anaInfo"></span>)</h2>
+      <table id="analysis"></table>
+    </div>
+    <div class="card">
+      <h2>정책망 후보수 (현재 차례 기준)</h2>
+      <table id="top"></table>
+    </div>
+    <div class="card" id="searchCard" style="display:none">
+      <h2>AI 직전 수의 탐색 결과 (방문 수 · 예상 승률)</h2>
+      <table id="search"></table>
+    </div>
+    <div class="card">
+      <h2>기보</h2>
+      <div id="history"></div>
+    </div>
+  </aside>
+</main>
+<script>
+const N = 19, COLS = "ABCDEFGHJKLMNOPQRST";
+const cv = document.getElementById("board"), ctx = cv.getContext("2d");
+const M = 80, S = (cv.width - 2 * M) / (N - 1);
+let st = null, busy = false, hover = -1, analyzing = false, polling = false, uiEpoch = 0;
+const candidateColor = rank => rank === 0 ? "#086ac4" : rank < 3 ? "#08734f" : "#465566";
+const showAnalysis = () => st && st.analysis && (st.live_enabled || document.getElementById("anaOn").checked);
+
+const px = a => [M + (a % N) * S, M + (N - 1 - Math.floor(a / N)) * S];
+
+function draw() {
+  const css = getComputedStyle(document.documentElement);
+  ctx.fillStyle = css.getPropertyValue("--wood"); ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.strokeStyle = "#3b2f1e"; ctx.lineWidth = 2;
+  for (let i = 0; i < N; i++) {
+    ctx.beginPath(); ctx.moveTo(M, M + i * S); ctx.lineTo(M + (N - 1) * S, M + i * S); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(M + i * S, M); ctx.lineTo(M + i * S, M + (N - 1) * S); ctx.stroke();
+  }
+  ctx.fillStyle = "#3b2f1e";
+  for (const x of [3, 9, 15]) for (const y of [3, 9, 15]) {
+    ctx.beginPath(); ctx.arc(M + x * S, M + y * S, 7, 0, 7); ctx.fill();
+  }
+  ctx.font = "26px -apple-system, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (let i = 0; i < N; i++) {
+    ctx.fillText(COLS[i], M + i * S, M / 2.4); ctx.fillText(COLS[i], M + i * S, cv.height - M / 2.4);
+    ctx.fillText(N - i, M / 2.4, M + i * S); ctx.fillText(N - i, cv.width - M / 2.4, M + i * S);
+  }
+  if (!st) return;
+  const showHeat = document.getElementById("heat").checked && !st.game_over &&
+    !showAnalysis();
+  if (showHeat) {
+    const pmax = Math.max(...st.policy.slice(0, N * N).map((p, a) => st.legal[a] ? p : 0)) || 1;
+    for (let a = 0; a < N * N; a++) {
+      if (!st.legal[a] || st.stones[a]) continue;
+      const p = st.policy[a]; if (p < 0.005) continue;
+      const [x, y] = px(a), r = Math.sqrt(p / pmax);
+      ctx.fillStyle = `rgba(47,111,222,${0.15 + 0.6 * r})`;
+      ctx.beginPath(); ctx.arc(x, y, S * 0.42 * Math.max(r, 0.35), 0, 7); ctx.fill();
+      if (p >= 0.02) {
+        ctx.fillStyle = "#fff"; ctx.font = "bold 22px -apple-system, sans-serif";
+        ctx.fillText(Math.round(p * 100), x, y + 1);
+      }
+    }
+  }
+  const terrOn = st.territory && document.getElementById("terr").checked;
+  if (terrOn) {
+    st.territory.map.forEach((o, a) => {
+      if (Math.abs(o) < 0.15) return;
+      const [x, y] = px(a), r = S * 0.5;
+      ctx.fillStyle = o > 0 ? `rgba(0,0,0,${0.55 * Math.abs(o)})` : `rgba(255,255,255,${0.7 * Math.abs(o)})`;
+      ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+    });
+  }
+  const order = {};
+  if (document.getElementById("nums").checked) st.history.forEach((v, i) => { if (v !== "pass") order[v] = i + 1; });
+  for (let a = 0; a < N * N; a++) {
+    const c = st.stones[a]; if (!c) continue;
+    const [x, y] = px(a);
+    const g = ctx.createRadialGradient(x - S * .15, y - S * .15, S * .05, x, y, S * .48);
+    if (c === 1) { g.addColorStop(0, "#555"); g.addColorStop(1, "#0a0a0a"); }
+    else { g.addColorStop(0, "#fff"); g.addColorStop(1, "#cfcac0"); }
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, S * 0.47, 0, 7); ctx.fill();
+    const v = COLS[a % N] + (Math.floor(a / N) + 1);
+    if (order[v]) {
+      ctx.fillStyle = c === 1 ? "#fff" : "#111"; ctx.font = "22px -apple-system, sans-serif";
+      ctx.fillText(order[v], x, y + 1);
+    } else if (a === st.last) {
+      ctx.strokeStyle = c === 1 ? "#fff" : "#111"; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(x, y, S * 0.22, 0, 7); ctx.stroke();
+    }
+  }
+  if (showAnalysis() && !st.game_over) {
+    st.analysis.candidates.forEach((c, i) => {
+      if (c.action >= N * N) return;
+      const [x, y] = px(c.action);
+      ctx.fillStyle = candidateColor(i);
+      ctx.strokeStyle = i === 0 ? "#fff" : "rgba(255,255,255,.65)";
+      ctx.lineWidth = i === 0 ? 5 : 2;
+      ctx.beginPath(); ctx.arc(x, y, S * 0.40, 0, 7); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 26px -apple-system, sans-serif"; ctx.fillText(i + 1, x, y - 9);
+      ctx.font = "18px -apple-system, sans-serif"; ctx.fillText(Math.round(c.win * 100) + "%", x, y + 14);
+    });
+  }
+  if (terrOn) {
+    ctx.strokeStyle = "#f5a524"; ctx.lineWidth = 5;
+    for (const a of st.territory.dead) {
+      const [x, y] = px(a), r = S * 0.2;
+      ctx.strokeRect(x - r, y - r, 2 * r, 2 * r);
+    }
+  }
+  if (st.game_over && st.judge) {
+    ctx.strokeStyle = "#e5484d"; ctx.lineWidth = 6;
+    for (const a of st.judge.dead) {
+      const [x, y] = px(a), r = S * 0.22;
+      ctx.beginPath(); ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r);
+      ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r); ctx.stroke();
+    }
+  }
+  if (hover >= 0 && myTurn() && st.legal[hover] && !st.stones[hover]) {
+    const [x, y] = px(hover);
+    ctx.fillStyle = st.to_move === "B" ? "rgba(0,0,0,.45)" : "rgba(255,255,255,.6)";
+    ctx.beginPath(); ctx.arc(x, y, S * 0.47, 0, 7); ctx.fill();
+  }
+}
+
+const myTurn = () => st && !st.game_over && (st.human === "both" || st.to_move === st.human) && !busy && !analyzing;
+
+function render() {
+  document.getElementById("komi").textContent = st.komi;
+  if (!busy) {
+    document.getElementById("playMode").value = st.human;
+    document.getElementById("liveOn").checked = !!st.live_enabled;
+  }
+  document.getElementById("engine").textContent = st.engine;
+  document.getElementById("model").textContent = st.model;
+  const sel = document.getElementById("strength");
+  if (![...sel.options].some(o => +o.value === st.playouts)) sel.add(new Option(`MCTS ${st.playouts}회`, st.playouts));
+  sel.value = st.playouts;
+  const ac = document.getElementById("anaCard"), ana = st.analysis;
+  ac.style.display = st.live_enabled || document.getElementById("anaOn").checked ? "" : "none";
+  if (ana) {
+    const who = st.to_move === "B" ? "흑" : "백";
+    document.getElementById("anaInfo").textContent = `${ana.playouts.toLocaleString()}회 누적 · ${who} 승률 기준${ana.continuous ? " · 실시간" : ""}`;
+    document.getElementById("analysis").innerHTML = ana.candidates.map((c, i) =>
+      `<tr><td><span style="color:${candidateColor(i)}">●</span> ${i + 1}. <b>${c.vertex === "pass" ? "패스" : c.vertex}</b><div class="pv">${c.pv.slice(0, 8).join(" ")}</div></td>
+       <td>${Math.round(c.win * 100)}%<div class="pv">${c.visits.toLocaleString()}회 · 방문 ${(100 * (c.visit_share || 0)).toFixed(1)}% · 정책 ${Math.round(c.prior * 100)}%</div></td></tr>`).join("");
+  } else {
+    document.getElementById("anaInfo").textContent = analyzing ? "분석 중…" : "내 차례에 자동 분석";
+    document.getElementById("analysis").innerHTML = "";
+  }
+  const ls = document.getElementById("liveStatus"), mv = document.getElementById("mctsValue");
+  document.getElementById("candidateLegend").style.display = showAnalysis() ? "" : "none";
+  ls.textContent = st.live_error ? `분석 오류: ${st.live_error}` :
+    st.game_over ? "대국 종료 · 탐색 정지" : st.live_enabled ?
+    (ana && ana.continuous ? `${ana.limit_reached ? "한도 도달 · 트리 보존 중" : "실시간 MCTS"} · ${ana.playouts.toLocaleString()}회 · ${(ana.nodes || 0).toLocaleString()} / ${(ana.node_limit || 200000).toLocaleString()}노드 · 트리 약 ${((ana.tree_bytes || 0) / 1048576).toFixed(0)} MiB${ana.limit_reached ? "" : ` · ${Math.round(ana.playouts / Math.max(ana.seconds, .01))}회/초`}` : "실시간 MCTS 시작 중…") : "";
+  mv.style.display = showAnalysis() && ana ? "" : "none";
+  if (ana) mv.textContent = `MCTS 추정: 흑 ${Math.round(ana.black_win * 100)}% · 백 ${Math.round((1 - ana.black_win) * 100)}%`;
+  const sc = document.getElementById("searchCard");
+  sc.style.display = st.search ? "" : "none";
+  if (st.search) document.getElementById("search").innerHTML = st.search.map(t =>
+    `<tr><td>${t.vertex === "pass" ? "패스" : t.vertex}</td><td>${t.visits}회 · ${Math.round((t.q + 1) * 50)}%</td></tr>`).join("");
+  const who = c => c === "B" ? "흑" : "백";
+  let s;
+  const res = v => v > 0 ? `흑 ${v}집 승` : v < 0 ? `백 ${-v}집 승` : "무승부";
+  if (st.game_over && st.judge) {
+    s = `대국 종료 · ${res(st.judge.score)} (GNU Go 사석 판정, × 표시 ${st.judge.dead.length}개 제거) · 참고: 사석 미처리 계가 ${res(st.score)}`;
+  } else if (st.game_over) {
+    s = `대국 종료 · ${res(st.score)} (사석 미처리 Tromp-Taylor 계가)`;
+  } else s = `${st.moves + 1}수째 · ${who(st.to_move)} 차례` + (st.human === "both" ? " (양쪽 직접 두기)" : st.to_move === st.human ? " (당신)" : " (AI 생각 중)");
+  document.getElementById("status").textContent = s;
+  const b = Math.round(st.black_win * 100);
+  document.getElementById("bBar").style.width = b + "%";
+  document.getElementById("wBar").style.width = (100 - b) + "%";
+  document.getElementById("bPct").textContent = `흑 ${b}%`;
+  document.getElementById("wPct").textContent = `백 ${100 - b}%`;
+  document.getElementById("top").innerHTML = st.top.map((t, i) =>
+    `<tr><td>${i + 1}. ${t.vertex === "pass" ? "패스" : t.vertex}</td><td>${(t.p * 100).toFixed(1)}%</td></tr>`).join("");
+  const sl = document.getElementById("scoreLead");
+  if (st.score_lead !== null && st.score_lead !== undefined) {
+    const v = st.score_lead, r = Math.round(Math.abs(v) * 2) / 2;
+    sl.style.display = "";
+    sl.textContent = `집 차이 head 예상: ${r < 0.5 ? "균형" : (v > 0 ? "흑 " : "백 ") + r + "집 우세"} (덤 포함)`;
+  } else sl.style.display = "none";
+  document.getElementById("terrWrap").style.display = st.territory ? "" : "none";
+  const ts = document.getElementById("terrScore");
+  if (st.territory && document.getElementById("terr").checked) {
+    const v = st.territory.score;
+    ts.style.display = "";
+    ts.textContent = `소유권 head 형세: ${v > 0 ? "흑 " + v + "집 우세" : v < 0 ? "백 " + (-v) + "집 우세" : "균형"} (덤 포함 · 주황 □ = 사석 추정 ${st.territory.dead.length}개)`;
+  } else ts.style.display = "none";
+  document.getElementById("capB").textContent = st.captures.B;
+  document.getElementById("capW").textContent = st.captures.W;
+  document.getElementById("history").textContent = st.history.map((v, i) => `${i + 1}.${v}`).join(" ");
+  for (const id of ["pass", "undo", "ai"]) document.getElementById(id).disabled = busy || st.game_over && id !== "undo";
+  for (const id of ["newB", "newW", "newBoth", "playMode", "liveOn", "strength"]) document.getElementById(id).disabled = busy;
+  draw();
+}
+
+async function api(path, body) {
+  if (busy) return;
+  uiEpoch++;
+  busy = true; if (st) render();
+  document.getElementById("error").textContent = "";
+  try {
+    const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error === "illegal move" ? "둘 수 없는 자리입니다 (착수 금지 또는 패)" : j.error);
+    st = j;
+  } catch (e) { document.getElementById("error").textContent = e.message; }
+  busy = false; render();
+  maybeAnalyze();
+}
+
+async function maybeAnalyze() {
+  if (!st || analyzing || busy || !document.getElementById("anaOn").checked) return;
+  if (st.game_over || st.live_enabled || (st.human !== "both" && st.to_move !== st.human) || st.analysis) return;
+  analyzing = true; render();
+  const epoch = uiEpoch;
+  try {
+    const r = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playouts: +document.getElementById("anaPlayouts").value }) });
+    if (r.ok) {
+      const next = await r.json();
+      if (epoch === uiEpoch && next.revision >= st.revision) st = next;
+    }
+  } finally { analyzing = false; render(); }
+}
+
+async function pollLive() {
+  if (!st || !st.live_enabled || busy || analyzing || polling || document.hidden) return;
+  polling = true;
+  const epoch = uiEpoch;
+  try {
+    const r = await fetch("/api/state");
+    if (r.ok) {
+      const next = await r.json();
+      if (!busy && epoch === uiEpoch && next.revision >= st.revision) { st = next; render(); }
+    }
+  } catch (e) { document.getElementById("error").textContent = `분석 연결 확인 중: ${e.message}`; }
+  finally { polling = false; }
+}
+setInterval(pollLive, 700);
+
+function pointAt(ev) {
+  const r = cv.getBoundingClientRect(), k = cv.width / r.width;
+  const x = Math.round(((ev.clientX - r.left) * k - M) / S), y = Math.round(((ev.clientY - r.top) * k - M) / S);
+  if (x < 0 || y < 0 || x >= N || y >= N) return -1;
+  return (N - 1 - y) * N + x;
+}
+cv.addEventListener("mousemove", ev => { const a = pointAt(ev); if (a !== hover) { hover = a; draw(); } });
+cv.addEventListener("mouseleave", () => { hover = -1; draw(); });
+cv.addEventListener("click", ev => { const a = pointAt(ev); if (a >= 0 && myTurn()) api("/api/play", { action: a }); });
+document.getElementById("newB").onclick = () => api("/api/new", { human: "B" });
+document.getElementById("newW").onclick = () => api("/api/new", { human: "W" });
+document.getElementById("newBoth").onclick = () => api("/api/new", { human: "both" });
+document.getElementById("playMode").onchange = e => api("/api/mode", { human: e.target.value });
+document.getElementById("liveOn").onchange = e => api("/api/live", { enabled: e.target.checked });
+document.getElementById("pass").onclick = () => myTurn() && api("/api/play", { action: N * N });
+document.getElementById("undo").onclick = () => api("/api/undo", {});
+document.getElementById("ai").onclick = () => myTurn() && api("/api/genmove", {});
+document.getElementById("heat").onchange = draw;
+document.getElementById("strength").onchange = e => api("/api/settings", { playouts: +e.target.value });
+document.getElementById("anaOn").onchange = () => { render(); maybeAnalyze(); };
+document.getElementById("anaPlayouts").onchange = () => { if (st) st.analysis = null; maybeAnalyze(); };
+document.getElementById("nums").onchange = draw;
+document.getElementById("terr").onchange = render;
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+api("/api/state");
+</script>
+</body>
+</html>
