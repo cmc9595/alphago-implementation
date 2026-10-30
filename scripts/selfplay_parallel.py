@@ -41,6 +41,7 @@ def main():
     ap.add_argument('--max-moves', type=int, default=600)
     ap.add_argument('--visits', type=int, default=400, help='full (training) search visits')
     ap.add_argument('--fast-visits', type=int, default=100)
+    ap.add_argument('--full-prob', type=float, default=.25, help='fraction of moves searched with --visits (training moves)')
     args = ap.parse_args(); os.chdir(ROOT)
     out = ROOT / 'runs/experiments' / args.run; out.mkdir(parents=True, exist_ok=True)
 
@@ -49,7 +50,7 @@ def main():
     memory_guard()
     net = load_net(str(ROOT / args.model), device)
     evaluator = NetEvaluator(net, device=device)
-    play = SearchPlayConfig(visits=args.visits, fast_visits=args.fast_visits, full_search_probability=.25, batch=32, max_moves=args.max_moves)
+    play = SearchPlayConfig(visits=args.visits, fast_visits=args.fast_visits, full_search_probability=args.full_prob, batch=32, max_moves=args.max_moves)
     cfg = ParallelConfig(play=play, parallel_games=args.parallel_games, leaves_per_game=args.leaves_per_game,
                          max_eval_batch=args.max_eval_batch, reuse_tree=args.reuse_tree, resign=args.resign)
     write_json(out / 'manifest.json', {'args': vars(args), 'config': asdict(cfg)})
