@@ -29,23 +29,33 @@ from value_source_ab import write_json, memory_guard
 class SelfPlay:
     """Keeps only train_mask (400-visit) positions in memory."""
 
-    def __init__(self, run_dirs, value_fraction, seed, val_mod=10, search_mix=0.0):
+    def __init__(self, run_dirs, value_fraction, seed, val_mod=10, search_mix=0.0, dedup=False):
         feats, pis, zs, owns, game_ids, svs, scs = [], [], [], [], [], [], []
         self.rejected = 0
         paths = [(k, p) for k, d in enumerate(run_dirs) for p in sorted(glob.glob(str(d / 'game_*.npz')))]
+        seen = set(); self.duplicates = 0
         for k, path in paths:
             with np.load(path) as d:
+                if dedup:
+                    key = d['moves'].tobytes()
+                    if key in seen:
+                        self.duplicates += 1; continue
+                    seen.add(key)
                 if bool(d['capped']) or not bool(d['judged']) or not np.isfinite(d['score']) or d['score'] == 0:
                     self.rejected += 1; continue
                 idx = np.flatnonzero(d['train_mask'])
                 side = np.where(idx % 2 == 0, 1., -1.).astype(np.float32)  # +1 = black to move
-                feats.append(d['features'][idx]); pis.append(d['policy'][idx].astype(np.float16))  # halves RAM
+                f_ = d['features'][idx]
+                if f_.max() > 1: raise ValueError('non-binary feature plane; bit-packing would lose data')
+                feats.append(np.packbits(f_, axis=1)); pis.append(d['policy'][idx].astype(np.float16))  # 8x / 2x less RAM
                 zs.append(np.sign(d['score']).astype(np.float32) * side)
                 svs.append(d['search_values'][idx].astype(np.float32))  # root Q, side-to-move view
                 scs.append(np.float32(d['score']) * side)  # final margin, side-to-move view
                 owns.append(d['ownership'].reshape(1, 19, 19).astype(np.int8) * side[:, None, None].astype(np.int8))
                 game_ids.append(np.full(len(idx), k * 10**9 + int(d['seed'])))  # unique across runs
-        self.x = np.concatenate(feats); self.pi = np.concatenate(pis)
+        self.planes = feats[0].shape[1] * 8 if feats else 0
+        self.n_planes = None
+        self.x = np.concatenate(feats); del feats; self.pi = np.concatenate(pis)
         self.z = np.concatenate(zs); self.own = np.concatenate(owns); self.score = np.concatenate(scs)
         # Training value target: blend of final outcome and the MCTS root value (KataGo/Lc0-style).
         # Evaluation keeps the pure outcome so numbers stay comparable across runs.
@@ -58,7 +68,8 @@ class SelfPlay:
         self.games = len(uniq); self.perm = symmetry_tables(19)
 
     def batch(self, rows, rng=None):
-        x, pi = self.x[rows].copy(), self.pi[rows].astype(np.float32)
+        x = np.unpackbits(self.x[rows], axis=1, count=34)
+        pi = self.pi[rows].astype(np.float32)
         own, z, vm = self.own[rows].astype(np.float32), self.z[rows], self.value_mask[rows]
         if rng is not None:
             z = self.zt[rows]  # training batches use the blended target
@@ -126,6 +137,7 @@ def main():
     ap.add_argument('--search-mix', type=float, default=0.0,
                     help='value target = (1-m)*outcome + m*MCTS root value (self-play rows only)')
     ap.add_argument('--save-evals', action='store_true', help='keep a checkpoint at every evaluation')
+    ap.add_argument('--dedup', action='store_true', help='drop exact duplicate games (identical move sequences)')
     ap.add_argument('--score-weight', type=float, default=0.0,
                     help='>0 adds a KataGo-style final-score head (Huber on margin/20), self-play + generated rows')
     args = ap.parse_args(); os.chdir(ROOT)
@@ -135,7 +147,7 @@ def main():
     if device.type != 'mps': raise RuntimeError('MPS unavailable')
     torch.mps.set_per_process_memory_fraction(.12)
 
-    sp = SelfPlay([ROOT / d for d in args.selfplay], args.value_fraction, args.seed, search_mix=args.search_mix)
+    sp = SelfPlay([ROOT / d for d in args.selfplay], args.value_fraction, args.seed, search_mix=args.search_mix, dedup=args.dedup)
     memory_guard()
     human = GameData([ROOT / 'data/kgs.npz', ROOT / 'data/fox_dan.npz'])
     gen = ValueData([load_gen()] + ([load_gen('data/value/gen_rlcont/batch_*.npz', name='gen2')]
@@ -143,7 +155,7 @@ def main():
     hx, hy, _ = human.sample(4096, np.random.default_rng(71), 'val', augment=False, threads=4)
     rows = gen.index['test'][np.random.default_rng(72).permutation(gen.size('test'))[:4096]]
     gen_eval = (*gen.batch_from_index(rows), gen.scores_from_index(rows))
-    info = {'args': vars(args), 'games': sp.games, 'rejected_games': sp.rejected,
+    info = {'args': vars(args), 'games': sp.games, 'rejected_games': sp.rejected, 'duplicate_games': sp.duplicates,
             'train_positions': len(sp.train), 'val_positions': len(sp.val),
             'value_labelled_train_positions': int(sp.value_mask[sp.train].sum())}
     print(json.dumps(info), flush=True)

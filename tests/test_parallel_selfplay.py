@@ -40,3 +40,14 @@ def test_same_seed_is_deterministic():
     a = [g.record()['moves'].tolist() for g in sorted(run(), key=lambda g: g.gid)]
     b = [g.record()['moves'].tolist() for g in sorted(run(), key=lambda g: g.gid)]
     assert a == b
+
+
+def test_fast_opening_sample_diversifies_openings():
+    def openings(flag):
+        play = SearchPlayConfig(visits=24, fast_visits=120, full_search_probability=.0001, board_size=9, max_moves=12, temperature_moves=10)
+        cfg = ParallelConfig(play=play, parallel_games=4, leaves_per_game=4, fast_opening_sample=flag)
+        out = []
+        ParallelSelfPlay(fake_eval, cfg, [(i, 500 + i) for i in range(8)], out.append).run()
+        return {tuple(g.record()['moves'][:10].tolist()) for g in out}
+    assert len(openings(False)) == 1   # uniform priors + greedy fast moves: every game identical
+    assert len(openings(True)) > 1

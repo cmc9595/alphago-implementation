@@ -36,6 +36,7 @@ class ParallelConfig:
     resign_threshold: float = 0.80   # resign when root value < -threshold (≈10% win)
     resign_moves: int = 3
     no_resign_fraction: float = 0.1
+    fast_opening_sample: bool = False  # fast moves also sample by visit share during the opening (diversity only)
 
 
 def make_nodes(boards, logits, values):
@@ -125,7 +126,10 @@ class Game:
         target = visit_target(root, p.board_size ** 2 + 1)
         n = int(root.N.sum())
         value = float(root.W.sum() / n)
-        temperature = (1. if self.board.move_number < p.temperature_moves else p.late_temperature) if self.full else 0.
+        if self.full:
+            temperature = 1. if self.board.move_number < p.temperature_moves else p.late_temperature
+        else:  # fast moves are not training targets; optional opening sampling only diversifies games
+            temperature = 1. if (self.cfg.fast_opening_sample and self.board.move_number < p.temperature_moves) else 0.
         action = choose_action(target, self.rng, temperature)
         self.features.append(self.board.features().copy())
         self.mask.append(self.full); self.policies.append(target); self.values.append(value)

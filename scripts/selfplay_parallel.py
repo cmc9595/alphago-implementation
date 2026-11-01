@@ -37,6 +37,8 @@ def main():
     ap.add_argument('--max-eval-batch', type=int, default=512)
     ap.add_argument('--reuse-tree', action='store_true')
     ap.add_argument('--resign', action='store_true')
+    ap.add_argument('--fast-opening-sample', action='store_true',
+                    help='first 30 moves: fast (non-training) moves also sample by visit share, for game diversity')
     ap.add_argument('--judge-threads', type=int, default=3)
     ap.add_argument('--max-moves', type=int, default=600)
     ap.add_argument('--visits', type=int, default=400, help='full (training) search visits')
@@ -52,7 +54,8 @@ def main():
     evaluator = NetEvaluator(net, device=device)
     play = SearchPlayConfig(visits=args.visits, fast_visits=args.fast_visits, full_search_probability=args.full_prob, batch=32, max_moves=args.max_moves)
     cfg = ParallelConfig(play=play, parallel_games=args.parallel_games, leaves_per_game=args.leaves_per_game,
-                         max_eval_batch=args.max_eval_batch, reuse_tree=args.reuse_tree, resign=args.resign)
+                         max_eval_batch=args.max_eval_batch, reuse_tree=args.reuse_tree, resign=args.resign,
+                         fast_opening_sample=args.fast_opening_sample)
     write_json(out / 'manifest.json', {'args': vars(args), 'config': asdict(cfg)})
 
     local = threading.local(); referees = []
