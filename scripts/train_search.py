@@ -29,12 +29,15 @@ from value_source_ab import write_json, memory_guard
 class SelfPlay:
     """Keeps only train_mask (400-visit) positions in memory."""
 
-    def __init__(self, run_dirs, value_fraction, seed, val_mod=10, search_mix=0.0, dedup=False):
-        feats, pis, zs, owns, game_ids, svs, scs = [], [], [], [], [], [], []
+    def __init__(self, run_dirs, value_fraction, seed, val_mod=10, search_mix=0.0, dedup=False, value_only_dirs=()):
+        """run_dirs: policy + value + ownership. value_only_dirs: older rounds, value + ownership only
+        (their visit distributions came from a weaker search, so they never supervise the policy)."""
+        feats, pis, zs, owns, game_ids, svs, scs, pol = [], [], [], [], [], [], [], []
         self.rejected = 0
-        paths = [(k, p) for k, d in enumerate(run_dirs) for p in sorted(glob.glob(str(d / 'game_*.npz')))]
+        dirs = [(d, True) for d in run_dirs] + [(d, False) for d in value_only_dirs]
+        paths = [(k, p, use_pol) for k, (d, use_pol) in enumerate(dirs) for p in sorted(glob.glob(str(d / 'game_*.npz')))]
         seen = set(); self.duplicates = 0
-        for k, path in paths:
+        for k, path, use_pol in paths:
             with np.load(path) as d:
                 if dedup:
                     key = d['moves'].tobytes()
@@ -53,6 +56,7 @@ class SelfPlay:
                 scs.append(np.float32(d['score']) * side)  # final margin, side-to-move view
                 owns.append(d['ownership'].reshape(1, 19, 19).astype(np.int8) * side[:, None, None].astype(np.int8))
                 game_ids.append(np.full(len(idx), k * 10**9 + int(d['seed'])))  # unique across runs
+                pol.append(np.full(len(idx), use_pol))
         self.planes = feats[0].shape[1] * 8 if feats else 0
         self.n_planes = None
         self.x = np.concatenate(feats); del feats; self.pi = np.concatenate(pis)
@@ -65,6 +69,9 @@ class SelfPlay:
         is_val = np.isin(games, list(val_games))
         self.train, self.val = np.flatnonzero(~is_val), np.flatnonzero(is_val)
         self.value_mask = np.random.default_rng(seed + 1).random(len(self.z)) < value_fraction
+        self.policy_mask = np.concatenate(pol)
+        # Report validation on policy-source games only, so metrics stay comparable with earlier runs.
+        self.val = self.val[self.policy_mask[self.val]]
         self.games = len(uniq); self.perm = symmetry_tables(19)
 
     def batch(self, rows, rng=None):
@@ -80,7 +87,7 @@ class SelfPlay:
                 if len(sel):
                     x[sel] = transform(x[sel], s); own[sel] = transform(own[sel], s)
                     old = pi[sel].copy(); pi[np.ix_(sel, self.perm[s])] = old
-        return x, pi, z, own, vm, self.score[rows]
+        return x, pi, z, own, vm, self.score[rows], self.policy_mask[rows]
 
 
 def to(device, *arrays):
@@ -92,7 +99,7 @@ def evaluate(net, sp, human_eval, gen_eval, device, batch=128):
     net.eval()
     ce = acc = mse = own_mse = score_abs = 0.; n = 0
     for i in range(0, len(sp.val), batch):
-        x, pi, z, own, _, sc = sp.batch(sp.val[i:i + batch])
+        x, pi, z, own, _, sc, _ = sp.batch(sp.val[i:i + batch])
         x, pi, z, own, sc = to(device, x, pi, z, own, sc)
         p, v, o, s_ = net.forward_heads(x.float())
         ce += float(-(pi * F.log_softmax(p, -1)).sum()); acc += float((p.argmax(1) == pi.argmax(1)).sum())
@@ -137,6 +144,8 @@ def main():
     ap.add_argument('--search-mix', type=float, default=0.0,
                     help='value target = (1-m)*outcome + m*MCTS root value (self-play rows only)')
     ap.add_argument('--save-evals', action='store_true', help='keep a checkpoint at every evaluation')
+    ap.add_argument('--value-only', nargs='*', default=[],
+                    help='older self-play runs used for value + ownership only (not policy)')
     ap.add_argument('--dedup', action='store_true', help='drop exact duplicate games (identical move sequences)')
     ap.add_argument('--score-weight', type=float, default=0.0,
                     help='>0 adds a KataGo-style final-score head (Huber on margin/20), self-play + generated rows')
@@ -147,7 +156,8 @@ def main():
     if device.type != 'mps': raise RuntimeError('MPS unavailable')
     torch.mps.set_per_process_memory_fraction(.12)
 
-    sp = SelfPlay([ROOT / d for d in args.selfplay], args.value_fraction, args.seed, search_mix=args.search_mix, dedup=args.dedup)
+    sp = SelfPlay([ROOT / d for d in args.selfplay], args.value_fraction, args.seed, search_mix=args.search_mix, dedup=args.dedup,
+                  value_only_dirs=[ROOT / d for d in args.value_only])
     memory_guard()
     human = GameData([ROOT / 'data/kgs.npz', ROOT / 'data/fox_dan.npz'])
     gen = ValueData([load_gen()] + ([load_gen('data/value/gen_rlcont/batch_*.npz', name='gen2')]
@@ -157,7 +167,8 @@ def main():
     gen_eval = (*gen.batch_from_index(rows), gen.scores_from_index(rows))
     info = {'args': vars(args), 'games': sp.games, 'rejected_games': sp.rejected, 'duplicate_games': sp.duplicates,
             'train_positions': len(sp.train), 'val_positions': len(sp.val),
-            'value_labelled_train_positions': int(sp.value_mask[sp.train].sum())}
+            'value_labelled_train_positions': int(sp.value_mask[sp.train].sum()),
+            'policy_train_positions': int(sp.policy_mask[sp.train].sum())}
     print(json.dumps(info), flush=True)
 
     ck = torch.load(ROOT / args.init, map_location='cpu', weights_only=False)
@@ -182,7 +193,7 @@ def main():
     training_mode(net)  # BN running stats frozen, all weights train
     for step in range(1, steps + 1):
         for g in opt.param_groups: g['lr'] = g['mult'] * args.lr * (.1 + .9 * .5 * (1 + math.cos(math.pi * step / steps)))
-        x, pi, z, own, vm, sc = sp.batch(sp.train[rng.integers(0, len(sp.train), args.batch)], rng)
+        x, pi, z, own, vm, sc, pm = sp.batch(sp.train[rng.integers(0, len(sp.train), args.batch)], rng)
         hxb, hyb, _ = human.sample(args.human_batch, rng, augment=True, threads=4)
         grows = gen.index['train'][rng.integers(0, gen.size('train'), args.gen_batch)]
         gxb, gzb, gob = gen.batch_from_index(grows, rng, augment=True); gsc = gen.scores_from_index(grows)
@@ -190,7 +201,9 @@ def main():
         pi_t, z_t, own_t, vm_t, hy_t, gz_t, go_t = to(device, pi, z, own, vm, hyb.astype(np.int64), gzb, gob)
         p, v, o, sh = net.forward_heads(xs)
         a, b = args.batch, args.batch + args.human_batch
-        policy_loss = -(pi_t * F.log_softmax(p[:a], -1)).sum(-1).mean()
+        pm_t = torch.from_numpy(pm).to(device)
+        ce_rows = -(pi_t * F.log_softmax(p[:a], -1)).sum(-1)
+        policy_loss = ce_rows[pm_t].mean() if pm_t.any() else ce_rows.sum() * 0
         human_loss = F.cross_entropy(p[a:b], hy_t)
         vmask = torch.cat([vm_t, gz_t != 0]); vtarget = torch.cat([z_t, gz_t]); vpred = torch.cat([v[:a], v[b:]])
         value_loss = F.mse_loss(vpred[vmask], vtarget[vmask]) if vmask.any() else v.sum() * 0
