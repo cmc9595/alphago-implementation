@@ -60,15 +60,23 @@ def main():
 
     local = threading.local(); referees = []
     def judge(game, rec):
-        if not hasattr(local, 'ref'):
-            local.ref = Referee(play.komi); referees.append(local.ref)
+        # GNU Go occasionally segfaults. A dead process must be replaced, otherwise every later
+        # game on this thread is saved unjudged (seen on the M1 Max in round 4). Retry once.
         t0 = time.monotonic()
-        try:
-            score, dead, own = local.ref.judge(rec['moves'].tolist())
-            rec.update(judged=True, score=float(score), dead=np.asarray(dead, np.int16),
-                       ownership=np.asarray(own, np.int8).reshape(-1))
-        except Exception as exc:
-            rec['judge_error'] = repr(exc)
+        for attempt in range(2):
+            if getattr(local, 'ref', None) is None:
+                local.ref = Referee(play.komi); referees.append(local.ref)
+            try:
+                score, dead, own = local.ref.judge(rec['moves'].tolist())
+                rec.update(judged=True, score=float(score), dead=np.asarray(dead, np.int16),
+                           ownership=np.asarray(own, np.int8).reshape(-1))
+                rec.pop('judge_error', None)
+                break
+            except Exception as exc:
+                rec['judge_error'] = repr(exc)
+                try: local.ref.close()
+                except Exception: pass
+                local.ref = None
         return time.monotonic() - t0
 
     pool = ThreadPoolExecutor(args.judge_threads); futures = []; done = []; lock = threading.Lock()
@@ -102,7 +110,10 @@ def main():
     ParallelSelfPlay(evaluator, cfg, seeds, on_finish, timers).run()
     for f in futures: f.result()
     wall = time.monotonic() - t0
-    pool.shutdown(); [r.close() for r in referees]
+    pool.shutdown()
+    for r in referees:
+        try: r.close()
+        except Exception: pass  # some were already closed after a crash
     moves = sum(d['moves'] for d in done)
     summary = {'games': len(done), 'wall_seconds': wall, 'seconds_per_game': wall / max(1, len(done)),
                'moves': moves, 'visits': sum(d['total_visits'] for d in done),
