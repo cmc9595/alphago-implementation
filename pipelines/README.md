@@ -14,3 +14,6 @@
 | `searchvalue_20261022.sh` | 가치 정답 = 0.5×승패 + 0.5×MCTS 승률 |
 | `score_head_20261023.sh` | 집 차이 head 추가 |
 | `eval_and_rating_20261022.sh`, `rating_final_20261023.sh` | KataGo 사람 모방 모델 상대 기력 측정 |
+| `round5_train_eval.sh` | 5바퀴: 3바퀴 모델에서 5바퀴 데이터 학습 → 3바퀴·1바퀴와 400회 100판 비교 → T5 |
+| `round5_searchmix.sh` | 5바퀴 데이터로 `--search-mix 0.5` 학습 → 5바퀴와 비교 (중단) |
+| `round6_selfplay.sh` | 6바퀴: 5바퀴 모델로 M3 Pro 자가대국 5,000판 (5바퀴와 같은 설정) |
