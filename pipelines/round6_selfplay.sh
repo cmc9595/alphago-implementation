@@ -3,7 +3,8 @@
 # Same settings as round 5: 1,600 visits on 12.5% of moves (training moves), 200 visits elsewhere with tree reuse,
 # first 30 moves sampled by visit share, no resignation. Resume: run the same command again.
 set -e
-cd ~/alphago-implementation
+cd "${0:A:h}/.."
+mkdir -p runs
 export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.3 PYTORCH_MPS_LOW_WATERMARK_RATIO=0.25
 GAMES=${GAMES:-5000}
 R=selfplay_round6_1600v_p125_f200_seed20600000

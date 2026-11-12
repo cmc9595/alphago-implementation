@@ -29,6 +29,21 @@ uv pip install --native-tls --python .venv/bin/python --no-build-isolation -e .
 
 C++ 수정 후 재빌드: `.venv/bin/python setup.py build_ext --inplace`
 
+## 다른 Apple Silicon 맥에서 6라운드 자가대국
+
+`git pull` 후 위 설치 명령으로 해당 맥에서 환경과 C++ 엔진을 빌드한다.
+5라운드 가중치 `checkpoints/round5/final.pt`는 저장소에 포함되어 있다.
+MCTS 코드와 학습 코드(`scripts/train_search.py`, `alphago/search_learning.py`)도 포함되어 있다.
+
+```bash
+zsh pipelines/round6_selfplay.sh
+# 짧은 실행: GAMES=2 zsh pipelines/round6_selfplay.sh
+```
+
+기본 5,000판, 학습 수 1,600 visits(12.5%), 나머지 200 visits로 실행한다.
+로그와 생성 기보는 `runs/`에 저장되며 Git에 포함되지 않는다.
+같은 명령을 다시 실행하면 이어서 진행한다.
+
 ## 데이터 준비
 
 ```bash
