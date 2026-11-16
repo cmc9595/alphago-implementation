@@ -10,7 +10,7 @@ value data (value + ownership). Validation is split by whole game.
 import os
 os.environ.setdefault('PYTORCH_MPS_HIGH_WATERMARK_RATIO', '.12')
 os.environ.setdefault('PYTORCH_MPS_LOW_WATERMARK_RATIO', '.10')
-import argparse, glob, json, math, sys, time
+import argparse, glob, hashlib, json, math, sys, time
 from pathlib import Path
 
 import numpy as np
@@ -26,10 +26,26 @@ from alphago.value_data import ValueData, load_gen
 from value_source_ab import write_json, memory_guard
 
 
+def concatenate_releasing(arrays):
+    """Concatenate while freeing input chunks, avoiding a full extra dataset copy."""
+    if not arrays:
+        raise ValueError('No valid self-play positions were loaded')
+    shape = (sum(len(a) for a in arrays), *arrays[0].shape[1:])
+    result = np.empty(shape, dtype=arrays[0].dtype)
+    arrays.reverse()
+    offset = 0
+    while arrays:
+        chunk = arrays.pop()
+        result[offset:offset + len(chunk)] = chunk
+        offset += len(chunk)
+        del chunk
+    return result
+
+
 class SelfPlay:
     """Keeps only train_mask (400-visit) positions in memory."""
 
-    def __init__(self, run_dirs, value_fraction, seed, val_mod=10, search_mix=0.0, dedup=False, value_only_dirs=()):
+    def __init__(self, run_dirs, value_fraction, seed, val_mod=10, search_mix=0.0, dedup=False, value_only_dirs=(), exclude_hashes=()):
         """run_dirs: policy + value + ownership. value_only_dirs: older rounds, value + ownership only
         (their visit distributions came from a weaker search, so they never supervise the policy)."""
         feats, pis, zs, owns, game_ids, svs, scs, pol = [], [], [], [], [], [], [], []
@@ -37,8 +53,13 @@ class SelfPlay:
         dirs = [(d, True) for d in run_dirs] + [(d, False) for d in value_only_dirs]
         paths = [(k, p, use_pol) for k, (d, use_pol) in enumerate(dirs) for p in sorted(glob.glob(str(d / 'game_*.npz')))]
         seen = set(); self.duplicates = 0
+        exclude_hashes = set(exclude_hashes); self.excluded = 0
         for k, path, use_pol in paths:
             with np.load(path) as d:
+                if exclude_hashes:
+                    digest = hashlib.sha256(np.asarray(d['moves'], dtype='<i2').tobytes()).hexdigest()
+                    if digest in exclude_hashes:
+                        self.excluded += 1; continue
                 if dedup:
                     key = d['moves'].tobytes()
                     if key in seen:
@@ -59,17 +80,17 @@ class SelfPlay:
                 pol.append(np.full(len(idx), use_pol))
         self.planes = feats[0].shape[1] * 8 if feats else 0
         self.n_planes = None
-        self.x = np.concatenate(feats); del feats; self.pi = np.concatenate(pis)
-        self.z = np.concatenate(zs); self.own = np.concatenate(owns); self.score = np.concatenate(scs)
+        self.x = concatenate_releasing(feats); self.pi = concatenate_releasing(pis)
+        self.z = concatenate_releasing(zs); self.own = concatenate_releasing(owns); self.score = concatenate_releasing(scs)
         # Training value target: blend of final outcome and the MCTS root value (KataGo/Lc0-style).
         # Evaluation keeps the pure outcome so numbers stay comparable across runs.
-        self.zt = ((1 - search_mix) * self.z + search_mix * np.concatenate(svs)).astype(np.float32)
-        games = np.concatenate(game_ids)
+        self.zt = ((1 - search_mix) * self.z + search_mix * concatenate_releasing(svs)).astype(np.float32)
+        games = concatenate_releasing(game_ids)
         uniq = np.unique(games); val_games = set(uniq[np.random.default_rng(seed).permutation(len(uniq))[:len(uniq) // val_mod]])
         is_val = np.isin(games, list(val_games))
         self.train, self.val = np.flatnonzero(~is_val), np.flatnonzero(is_val)
         self.value_mask = np.random.default_rng(seed + 1).random(len(self.z)) < value_fraction
-        self.policy_mask = np.concatenate(pol)
+        self.policy_mask = concatenate_releasing(pol)
         # Report validation on policy-source games only, so metrics stay comparable with earlier runs.
         self.val = self.val[self.policy_mask[self.val]]
         self.games = len(uniq); self.perm = symmetry_tables(19)
@@ -108,18 +129,23 @@ def evaluate(net, sp, human_eval, gen_eval, device, batch=128):
     out = {'selfplay_policy_ce': ce / n, 'selfplay_top1_match': acc / n, 'selfplay_value_mse': mse / n,
            'selfplay_ownership_mse': own_mse / n, 'selfplay_val_positions': n}
     if net.cfg.score: out['selfplay_score_mae'] = score_abs / n
-    hx, hy = human_eval; gx, gz, _, gsc = gen_eval
-    hit = 0; vs = []; ss = []
-    for i in range(0, len(hy), batch):
-        p, _, _ = net.forward_all(torch.from_numpy(hx[i:i + batch]).to(device).float())
-        hit += int((p.argmax(1).cpu().numpy() == hy[i:i + batch]).sum())
-    for i in range(0, len(gz), batch):
-        _, vv, _, s_ = net.forward_heads(torch.from_numpy(gx[i:i + batch]).to(device).float())
-        vs.append(vv.cpu().numpy())
-        if s_ is not None: ss.append(s_.cpu().numpy() * SCORE_SCALE)
-    v = np.concatenate(vs); k = gz != 0
-    out.update(human_policy_acc=hit / len(hy), gen_value_mse=float(((v[k] - gz[k]) ** 2).mean()))
-    if ss: out['gen_score_mae'] = float(np.abs(np.concatenate(ss) - gsc).mean())
+    if human_eval is not None:
+        hx, hy = human_eval
+        hit = 0
+        for i in range(0, len(hy), batch):
+            p, _, _ = net.forward_all(torch.from_numpy(hx[i:i + batch]).to(device).float())
+            hit += int((p.argmax(1).cpu().numpy() == hy[i:i + batch]).sum())
+        out['human_policy_acc'] = hit / len(hy)
+    if gen_eval is not None:
+        gx, gz, _, gsc = gen_eval
+        vs, ss = [], []
+        for i in range(0, len(gz), batch):
+            _, vv, _, s_ = net.forward_heads(torch.from_numpy(gx[i:i + batch]).to(device).float())
+            vs.append(vv.cpu().numpy())
+            if s_ is not None: ss.append(s_.cpu().numpy() * SCORE_SCALE)
+        v = np.concatenate(vs); k = gz != 0
+        out['gen_value_mse'] = float(((v[k] - gz[k]) ** 2).mean())
+        if ss: out['gen_score_mae'] = float(np.abs(np.concatenate(ss) - gsc).mean())
     return out
 
 
@@ -131,8 +157,8 @@ def main():
     ap.add_argument('--value-fraction', type=float, default=1 / 20)
     ap.add_argument('--epochs', type=float, default=2.0)
     ap.add_argument('--batch', type=int, default=64, help='self-play rows per update')
-    ap.add_argument('--human-batch', type=int, default=16)
-    ap.add_argument('--gen-batch', type=int, default=16)
+    ap.add_argument('--human-batch', type=int, default=16, help='human-policy anchor rows; 0 disables data loading and evaluation')
+    ap.add_argument('--gen-batch', type=int, default=16, help='generated-value anchor rows; 0 disables data loading and evaluation')
     ap.add_argument('--value-weight', type=float, default=1.0)
     ap.add_argument('--ownership-weight', type=float, default=0.5)
     ap.add_argument('--lr', type=float, default=0.001)
@@ -147,25 +173,46 @@ def main():
     ap.add_argument('--value-only', nargs='*', default=[],
                     help='older self-play runs used for value + ownership only (not policy)')
     ap.add_argument('--dedup', action='store_true', help='drop exact duplicate games (identical move sequences)')
+    ap.add_argument('--exclude-manifest', help='fixed holdout manifest; exclude matching move hashes from ALL self-play sources')
     ap.add_argument('--score-weight', type=float, default=0.0,
                     help='>0 adds a KataGo-style final-score head (Huber on margin/20), self-play + generated rows')
     args = ap.parse_args(); os.chdir(ROOT)
+    if args.batch < 1 or args.human_batch < 0 or args.gen_batch < 0:
+        ap.error('batch must be positive; anchor batches must be nonnegative')
     out = ROOT / 'runs/experiments' / args.run; out.mkdir(parents=True, exist_ok=True)
     ckdir = ROOT / 'checkpoints' / args.run; ckdir.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(4); device = pick_device()
     if device.type != 'mps': raise RuntimeError('MPS unavailable')
     torch.mps.set_per_process_memory_fraction(.12)
 
+    # Fail before loading a large self-play dataset when anchor data are missing.
+    required = [ROOT / args.init]
+    if args.human_batch:
+        required += [ROOT / 'data/kgs.npz', ROOT / 'data/fox_dan.npz']
+    missing = [str(p) for p in required if not p.is_file()]
+    if args.gen_batch and not list((ROOT / 'data/value/gen').glob('batch_*.npz')):
+        missing.append(str(ROOT / 'data/value/gen/batch_*.npz'))
+    if missing: raise FileNotFoundError('Missing training inputs: ' + ', '.join(missing))
+    exclude_hashes = set()
+    if args.exclude_manifest:
+        manifest = json.loads((ROOT / args.exclude_manifest).read_text())
+        exclude_hashes = {row['sha256_moves'] for row in manifest['test_games']}
+        if not exclude_hashes: raise ValueError('Empty holdout manifest')
     sp = SelfPlay([ROOT / d for d in args.selfplay], args.value_fraction, args.seed, search_mix=args.search_mix, dedup=args.dedup,
-                  value_only_dirs=[ROOT / d for d in args.value_only])
+                  value_only_dirs=[ROOT / d for d in args.value_only], exclude_hashes=exclude_hashes)
     memory_guard()
-    human = GameData([ROOT / 'data/kgs.npz', ROOT / 'data/fox_dan.npz'])
-    gen = ValueData([load_gen()] + ([load_gen('data/value/gen_rlcont/batch_*.npz', name='gen2')]
-                                    if args.gen_sources == 'gen+gen2' else []))
-    hx, hy, _ = human.sample(4096, np.random.default_rng(71), 'val', augment=False, threads=4)
-    rows = gen.index['test'][np.random.default_rng(72).permutation(gen.size('test'))[:4096]]
-    gen_eval = (*gen.batch_from_index(rows), gen.scores_from_index(rows))
+    human = GameData([ROOT / 'data/kgs.npz', ROOT / 'data/fox_dan.npz']) if args.human_batch else None
+    gen = (ValueData([load_gen()] + ([load_gen('data/value/gen_rlcont/batch_*.npz', name='gen2')]
+                                    if args.gen_sources == 'gen+gen2' else [])) if args.gen_batch else None)
+    human_eval = gen_eval = None
+    if human is not None:
+        hx, hy, _ = human.sample(4096, np.random.default_rng(71), 'val', augment=False, threads=4)
+        human_eval = (hx, hy)
+    if gen is not None:
+        rows = gen.index['test'][np.random.default_rng(72).permutation(gen.size('test'))[:4096]]
+        gen_eval = (*gen.batch_from_index(rows), gen.scores_from_index(rows))
     info = {'args': vars(args), 'games': sp.games, 'rejected_games': sp.rejected, 'duplicate_games': sp.duplicates,
+            'excluded_holdout_games': sp.excluded,
             'train_positions': len(sp.train), 'val_positions': len(sp.val),
             'value_labelled_train_positions': int(sp.value_mask[sp.train].sum()),
             'policy_train_positions': int(sp.policy_mask[sp.train].sum())}
@@ -178,7 +225,7 @@ def main():
     if unexpected or any(not k.startswith('score_') for k in missing): raise ValueError(f'init mismatch {missing} {unexpected}')
     if missing: print('new head parameters:', missing, flush=True)
     torch.manual_seed(args.seed)
-    base = evaluate(net, sp, (hx, hy), gen_eval, device)
+    base = evaluate(net, sp, human_eval, gen_eval, device)
     info['baseline'] = base; write_json(out / 'info.json', info); print('baseline', json.dumps(base), flush=True)
 
     # New score head learns 10x faster than the pretrained trunk/heads.
@@ -194,9 +241,13 @@ def main():
     for step in range(1, steps + 1):
         for g in opt.param_groups: g['lr'] = g['mult'] * args.lr * (.1 + .9 * .5 * (1 + math.cos(math.pi * step / steps)))
         x, pi, z, own, vm, sc, pm = sp.batch(sp.train[rng.integers(0, len(sp.train), args.batch)], rng)
-        hxb, hyb, _ = human.sample(args.human_batch, rng, augment=True, threads=4)
-        grows = gen.index['train'][rng.integers(0, gen.size('train'), args.gen_batch)]
-        gxb, gzb, gob = gen.batch_from_index(grows, rng, augment=True); gsc = gen.scores_from_index(grows)
+        hxb, hyb = x[:0], np.empty(0, np.int64)
+        if human is not None:
+            hxb, hyb, _ = human.sample(args.human_batch, rng, augment=True, threads=4)
+        gxb, gzb, gob, gsc = x[:0], z[:0], own[:0], sc[:0]
+        if gen is not None:
+            grows = gen.index['train'][rng.integers(0, gen.size('train'), args.gen_batch)]
+            gxb, gzb, gob = gen.batch_from_index(grows, rng, augment=True); gsc = gen.scores_from_index(grows)
         xs = torch.from_numpy(np.concatenate([x, hxb, gxb])).to(device).float()
         pi_t, z_t, own_t, vm_t, hy_t, gz_t, go_t = to(device, pi, z, own, vm, hyb.astype(np.int64), gzb, gob)
         p, v, o, sh = net.forward_heads(xs)
@@ -204,7 +255,7 @@ def main():
         pm_t = torch.from_numpy(pm).to(device)
         ce_rows = -(pi_t * F.log_softmax(p[:a], -1)).sum(-1)
         policy_loss = ce_rows[pm_t].mean() if pm_t.any() else ce_rows.sum() * 0
-        human_loss = F.cross_entropy(p[a:b], hy_t)
+        human_loss = F.cross_entropy(p[a:b], hy_t) if human is not None else p.sum() * 0
         vmask = torch.cat([vm_t, gz_t != 0]); vtarget = torch.cat([z_t, gz_t]); vpred = torch.cat([v[:a], v[b:]])
         value_loss = F.mse_loss(vpred[vmask], vtarget[vmask]) if vmask.any() else v.sum() * 0
         own_loss = F.mse_loss(torch.cat([o[:a], o[b:]]), torch.cat([own_t, go_t]))
@@ -218,7 +269,7 @@ def main():
         torch.nn.utils.clip_grad_norm_(net.parameters(), 5., error_if_nonfinite=True); opt.step()
         if step % args.eval_every == 0 or step == steps:
             rec = {'step': step, 'steps': steps, 'loss': loss.item(), 'seconds': time.monotonic() - t0,
-                   **evaluate(net, sp, (hx, hy), gen_eval, device)}
+                   **evaluate(net, sp, human_eval, gen_eval, device)}
             history.append(rec); training_mode(net); print(json.dumps(rec), flush=True)
             if args.save_evals:
                 torch.save({'model': net.state_dict(), 'config': vars(cfg), 'step': step}, ckdir / f'step_{step:06d}.pt')
