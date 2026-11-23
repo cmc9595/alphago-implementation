@@ -12,9 +12,11 @@ os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.3")
 os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.25")
 
 import argparse
+import hashlib
 import json
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -26,6 +28,7 @@ from alphago import Board, Color
 from alphago.gtp import PolicyPlayer, action_to_vertex, load_net, vertex_to_action
 from alphago.gnugo import Referee
 from alphago.mcts import MCTS, MCTSPlayer, TreeBudget
+from alphago.web_records import save_finished_game, search_record
 
 MAX_PLAYOUTS = 12800
 SEARCH_BATCH = 32
@@ -37,8 +40,11 @@ UI = Path(__file__).resolve().parent.parent / "ui" / "index.html"
 
 
 class Game:
-    def __init__(self, net, value_net=None, playouts=1600, temperature=0.0):
+    def __init__(self, net, value_net=None, playouts=1600, temperature=0.0, save_dir=None):
         self.net, self.value_net = net, value_net
+        self.save_dir = Path(save_dir) if save_dir is not None else None
+        self.model_name = 'unknown'
+        self.model_provenance = {}
         self.policy = PolicyPlayer(net, temperature=temperature)
         self.lock = threading.RLock()
         self.compute_lock = threading.Lock()
@@ -51,6 +57,7 @@ class Game:
         self.live_error = None
         self.live_last_seen = 0.
         self.analysis = None
+        self._analysis_record = None
         self.set_playouts(playouts)
         self.new(human="B", komi=7.5)
         self._worker = threading.Thread(target=self._live_worker, daemon=True, name="live-mcts")
@@ -68,6 +75,7 @@ class Game:
         self._cancel = threading.Event()
         self.revision += 1
         self.analysis = None
+        self._analysis_record = None
         self._static_state = None
         self._judge_key = None
         self._wake.set()
@@ -91,6 +99,7 @@ class Game:
         self._wake.set()
 
     def analysis_snapshot(self, root, *, continuous=False, seconds=0., budget=None):
+        self._analysis_record = search_record(root)
         total = int(root.N.sum())
         cands = []
         order = [i for i in np.argsort(-root.N) if root.N[i] > 0][:ANALYSIS_CANDIDATES]
@@ -239,30 +248,56 @@ class Game:
         self.human = human
         self.komi = komi
         self.history: list[int] = []
+        self.move_records = []
+        self.game_id = uuid.uuid4().hex
+        self.saved_game = None
+        self.save_error = None
         self.board = Board(19, komi, superko=True)
 
     def rebuild(self):
         self.invalidate()
+        self.move_records = self.move_records[:len(self.history)]
+        self.saved_game = None
+        self.save_error = None
         self.board = Board(19, self.komi, superko=True)
         for a in self.history:
             self.board.play(a)
 
-    def play(self, a):
+    def play(self, a, source='human', search=None):
         if self.board.game_over:
             raise ValueError("game is over")
         if not self.board.is_legal(a):
             raise ValueError("illegal move")
+        rec = {'source': source, 'search': search if search is not None else self._analysis_record,
+               'model': self.model_name, 'configured_playouts': self.playouts}
         self.invalidate()
         self.board.play(a)
         self.history.append(a)
+        self.move_records.append(rec)
+        if self.board.game_over:
+            self.autosave()
+
+    def autosave(self):
+        if self.save_dir is None or not self.board.game_over or self.saved_game:
+            return
+        try:
+            self.saved_game = save_finished_game(self.save_dir, self.game_id, self.history,
+                                                 self.move_records, self.komi, self.judge(),
+                                                 {'label': self.model_name, **self.model_provenance})
+            self.save_error = None
+        except Exception as exc:
+            self.save_error = str(exc)
 
     def engine_move(self):
         if not self.board.game_over:
             with self.compute_lock:
                 move = self.player.genmove(self.board)
-            self.play(move)
+            root = getattr(self.player, 'last_root', None)
+            rec = search_record(root)
+            self.play(move, source='engine_mcts' if rec else 'engine_policy', search=rec)
 
     def state(self):
+        self.autosave()
         if self._static_state is None:
             with self.compute_lock:
                 self._static_state = self._position_state()
@@ -273,7 +308,8 @@ class Game:
                      (self.human == "both" or (self.board.to_move == Color.BLACK) == (self.human == "B")) and
                      time.monotonic() - self.live_last_seen < 10 and
                      not bool(self.analysis and self.analysis.get("limit_reached")),
-                     analysis=self.analysis if self.analysis and self.analysis.get("revision") == self.revision else None)
+                      analysis=self.analysis if self.analysis and self.analysis.get("revision") == self.revision else None,
+                      saved_game=self.saved_game, save_error=self.save_error)
         return state
 
     def _position_state(self):
@@ -373,7 +409,7 @@ def make_handler(game: Game):
                         # Replay a game record: {"history": ["Q4", "D16", ...], "human": "B"|"W"}
                         game.new(req.get("human", "B"), float(req.get("komi", game.komi)))
                         for v in req["history"]:
-                            game.play(vertex_to_action(v, 19))
+                            game.play(vertex_to_action(v, 19), source='imported')
                         if game.human == "both":
                             game.set_live(req.get("live_enabled", True))
                     elif self.path == "/api/genmove":
@@ -408,10 +444,17 @@ def main():
     ap.add_argument("--playouts", type=int, default=1600, help="initial engine strength; 0 = raw policy (changeable in the page)")
     ap.add_argument("--value-model", default=None)
     ap.add_argument("--label", default=None, help="model name shown in the page")
+    ap.add_argument("--save-dir", default=str(UI.parent.parent / 'runs/browser_games'),
+                    help="completed games are automatically archived here as SGF/NPZ/JSON")
     args = ap.parse_args()
     value_net = load_net(args.value_model) if args.value_model else None
-    game = Game(load_net(args.model), value_net, playouts=args.playouts, temperature=args.temperature)
+    game = Game(load_net(args.model), value_net, playouts=args.playouts, temperature=args.temperature, save_dir=args.save_dir)
     game.model_name = args.label or Path(args.model).parent.name + "/" + Path(args.model).stem
+    game.model_provenance = {'policy_path': str(Path(args.model).resolve()),
+                             'policy_sha256': hashlib.sha256(Path(args.model).read_bytes()).hexdigest()}
+    if args.value_model:
+        game.model_provenance.update(value_path=str(Path(args.value_model).resolve()),
+                                     value_sha256=hashlib.sha256(Path(args.value_model).read_bytes()).hexdigest())
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(game))
     print(f"model {args.model}\nopen http://localhost:{args.port}", flush=True)
     try:

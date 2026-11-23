@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import time
+import unicodedata
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUN = 'round3_20k_seed20297031_20261102'
@@ -17,7 +18,40 @@ def read_json(path, default):
         return default
 
 
-def render(run):
+def display_width(text):
+    return sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in str(text))
+
+
+def metrics_table(info, history, rows=20):
+    baseline = info.get('baseline', {})
+    records = [('기준', baseline)] if baseline else []
+    records += [(f"{rec['step']:,}", rec) for rec in (history[-rows:] if rows else history)]
+    if not records:
+        return []
+    columns = [('loss', '손실'), ('selfplay_policy_ce', '정책 CE'),
+               ('selfplay_value_mse', '가치 MSE'), ('selfplay_ownership_mse', '소유권 MSE'),
+               ('selfplay_top1_match', '정책 일치율'), ('human_policy_acc', '사람 정확도'),
+               ('gen_value_mse', '생성 가치 MSE')]
+    columns = [(key, title) for key, title in columns if any(key in rec for _, rec in records)]
+    headers = ['스텝', '경과 시간', *[title for _, title in columns]]
+    data = []
+    for label, rec in records:
+        seconds = int(rec.get('seconds', 0))
+        elapsed = f'{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}' if 'seconds' in rec else '—'
+        values = []
+        for key, _ in columns:
+            value = rec.get(key)
+            values.append('—' if value is None else
+                          (f'{value:.1%}' if key in ('selfplay_top1_match', 'human_policy_acc') else f'{value:.4f}'))
+        data.append([label, elapsed, *values])
+    widths = [max(display_width(row[i]) for row in [headers, *data]) for i in range(len(headers))]
+    def line(row):
+        return '| ' + ' | '.join(' ' * (w - display_width(cell)) + cell for cell, w in zip(row, widths)) + ' |'
+    border = '+' + '+'.join('-' * (w + 2) for w in widths) + '+'
+    return [border, line(headers), border, *[line(row) for row in data], border]
+
+
+def render(run, rows=20):
     out = ROOT / 'runs/experiments' / run
     ckdir = ROOT / 'checkpoints' / run
     info = read_json(out / 'info.json', {})
@@ -58,17 +92,17 @@ def render(run):
         if alive and not done:
             remaining = max(0, total - step) * rate
             lines.append(f'남은 시간 약 {remaining / 3600:.1f}시간 · 종료 예상 {datetime.now() + timedelta(seconds=remaining):%m-%d %H:%M}')
-        for key, label in [('loss', '학습 손실'), ('selfplay_policy_ce', '정책 CE'),
-                           ('selfplay_value_mse', '가치 MSE'), ('selfplay_ownership_mse', '소유권 MSE'),
-                           ('human_policy_acc', '사람 정책 정확도'), ('gen_value_mse', '생성데이터 가치 MSE')]:
-            if key in last:
-                lines.append(f'{label}: {last[key]:.4f}')
-        lines.append('진행률·지표는 평가 시점마다 갱신됩니다.')
     elif alive:
         lines.append('기준 모델 평가 중' if info else '데이터 로딩 / 준비 중')
+    lines.extend(metrics_table(info, history, rows))
+    if history:
+        lines.append('손실은 해당 평가 스텝의 학습 배치 값이며, CE·MSE·일치율은 검증셋 기준입니다.')
+        lines.append(f'최근 {min(rows, len(history)) if rows else len(history)}개 평가 표시 · --rows 0으로 전체 표시 · 지표는 평가 시점마다 갱신됩니다.')
     if not alive and not done:
-        missing = [p for p in ['data/kgs.npz', 'data/fox_dan.npz'] if not (ROOT / p).exists()]
-        if not list((ROOT / 'data/value/gen').glob('batch_*.npz')):
+        args = info.get('args', {})
+        missing = [p for p in ['data/kgs.npz', 'data/fox_dan.npz']
+                   if args.get('human_batch', 0) > 0 and not (ROOT / p).exists()]
+        if args.get('gen_batch', 0) > 0 and not list((ROOT / 'data/value/gen').glob('batch_*.npz')):
             missing.append('data/value/gen/batch_*.npz')
         if missing:
             lines.append('필수 학습 데이터 없음: ' + ', '.join(missing))
@@ -82,12 +116,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('run', nargs='?', default=DEFAULT_RUN)
     ap.add_argument('--watch', action='store_true')
+    ap.add_argument('--rows', type=int, default=20, help='recent evaluation rows; 0 shows all')
     args = ap.parse_args()
+    if args.rows < 0:
+        ap.error('--rows must be nonnegative')
     try:
         while True:
             if args.watch:
                 print('\033[2J\033[H', end='')
-            print(render(args.run), flush=True)
+            print(render(args.run, args.rows), flush=True)
             if not args.watch:
                 break
             time.sleep(15)

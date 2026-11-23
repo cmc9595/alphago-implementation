@@ -34,8 +34,11 @@ def test_holdout_excludes_duplicate_moves_from_policy_and_value_sources(tmp_path
                      train_mask=np.ones(2, bool), features=np.zeros((2, 34, 19, 19), np.uint8),
                      policy=np.full((2, 362), 1 / 362, np.float32),
                      search_values=np.zeros(2, np.float32), ownership=np.ones(361, np.int8))
+        np.savez(folder / 'game_8888.npz', moves=np.array([361, 361], np.int16),
+                 capped=False, judged=True, score=1., train_mask=np.zeros(2, bool))
     sp = SelfPlay([policy], .5, 1, val_mod=2, value_only_dirs=[value], exclude_hashes={digest})
     assert sp.excluded == 2
+    assert sp.empty_games == 2
     assert sp.games == 8
     assert len(sp.z) == 16
     assert sp.policy_mask.sum() == 8

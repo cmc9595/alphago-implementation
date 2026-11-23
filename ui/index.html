@@ -295,6 +295,8 @@ function render() {
   } else if (st.game_over) {
     s = `대국 종료 · ${res(st.score)} (사석 미처리 Tromp-Taylor 계가)`;
   } else s = `${st.moves + 1}수째 · ${who(st.to_move)} 차례` + (st.human === "both" ? " (양쪽 직접 두기)" : st.to_move === st.human ? " (당신)" : " (AI 생각 중)");
+  if (st.game_over && st.saved_game) s += " · 기보 자동 저장 완료";
+  if (st.save_error) s += ` · 기보 저장 실패: ${st.save_error}`;
   document.getElementById("status").textContent = s;
   const b = Math.round(st.black_win * 100);
   document.getElementById("bBar").style.width = b + "%";

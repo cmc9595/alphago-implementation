@@ -12,6 +12,19 @@ Apple Silicon 맥북 한 대(M3 Pro)로 축소 재현해 19줄 아마추어 수�
 .venv/bin/python -u scripts/play_server.py --model checkpoints/scorehead_20261023/final.pt --port 8767
 ```
 
+## 바둑판 기보 자동 저장
+
+브라우저 대국이 두 번의 패스로 끝나면 `runs/browser_games/`에 `.sgf`, `.npz`, `.json`을 자동 저장한다.
+`scripts/play_server.py --save-dir <경로>`로 위치를 바꿀 수 있다. 화면에 저장 완료/실패가 표시된다.
+
+- SGF: 착수·덤·GNU Go 최종 결과, 수별 주체 및 기록된 MCTS 방문 수·Q.
+- NPZ: 수별 특징·전체 방문 분포·Q·방문 수, 최종 승패·소유권. JSON: 모델 경로·SHA256·수별 출처.
+- 사람/불러온 기보/정책망 단독 착수는 MCTS 정책 학습 정답으로 표시하지 않는다.
+  사람 착수 직전 분석이 있었다면 참고용으로 보존하되 `train_mask=False`다.
+- 판정 실패 시 `judged=False`, 점수는 미확정으로 저장한다. 임의 계가를 학습 정답으로 사용하지 않는다.
+- 저장만 자동이며 **학습에는 자동 편입하지 않는다.** 탐색량이 많아도 품질 보장은 없으므로 검토 후 사용한다.
+- 서버 재시작 이전 착수의 방문 분포·Q는 복원할 수 없다. 기존 기보를 불러오면 해당 수들은 imported로 구분한다.
+
 ## 구성
 
 - `engine/src/` — C++ 바둑 엔진(규칙, 패, 활로, 축 읽기, 34평면 특징), pybind11 바인딩

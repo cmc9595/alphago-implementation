@@ -50,6 +50,7 @@ class SelfPlay:
         (their visit distributions came from a weaker search, so they never supervise the policy)."""
         feats, pis, zs, owns, game_ids, svs, scs, pol = [], [], [], [], [], [], [], []
         self.rejected = 0
+        self.empty_games = 0
         dirs = [(d, True) for d in run_dirs] + [(d, False) for d in value_only_dirs]
         paths = [(k, p, use_pol) for k, (d, use_pol) in enumerate(dirs) for p in sorted(glob.glob(str(d / 'game_*.npz')))]
         seen = set(); self.duplicates = 0
@@ -68,6 +69,9 @@ class SelfPlay:
                 if bool(d['capped']) or not bool(d['judged']) or not np.isfinite(d['score']) or d['score'] == 0:
                     self.rejected += 1; continue
                 idx = np.flatnonzero(d['train_mask'])
+                if not len(idx):
+                    self.empty_games += 1
+                    continue
                 side = np.where(idx % 2 == 0, 1., -1.).astype(np.float32)  # +1 = black to move
                 f_ = d['features'][idx]
                 if f_.max() > 1: raise ValueError('non-binary feature plane; bit-packing would lose data')
@@ -213,6 +217,7 @@ def main():
         gen_eval = (*gen.batch_from_index(rows), gen.scores_from_index(rows))
     info = {'args': vars(args), 'games': sp.games, 'rejected_games': sp.rejected, 'duplicate_games': sp.duplicates,
             'excluded_holdout_games': sp.excluded,
+            'games_without_training_positions': sp.empty_games,
             'train_positions': len(sp.train), 'val_positions': len(sp.val),
             'value_labelled_train_positions': int(sp.value_mask[sp.train].sum()),
             'policy_train_positions': int(sp.policy_mask[sp.train].sum())}
